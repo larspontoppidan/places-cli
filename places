@@ -1,0 +1,260 @@
+#!/usr/bin/env python3
+"""Places v1.0 by Lars Ole Pontoppidan. 
+
+A CLI tool for managing folder bookmarks and places in Linux desktop environments. 
+
+https://github.com/larspontoppidan/places-cli
+"""
+
+Usage = """Usage:
+  places list
+  places add "TITLE" "PATH"
+  places remove "TITLE"
+"""
+
+# ----
+
+import sys
+import os
+from urllib.parse import quote, unquote, urlparse
+from lxml import etree
+
+def get_places() -> list["PlacesBase"]:
+    # This list may be modified to tailor the script:
+    return [
+        KDEPlaces(),
+        GtkPlaces("3.0"),
+        GtkPlaces("4.0")
+    ]
+
+# ---- Utils
+
+
+class NotSupportedException(Exception):
+    pass
+
+class UsageException(Exception):
+    pass
+
+def decode_file_uri(uri: str) -> str:
+    """Convert file:// URI to plain filesystem path."""
+    if not uri.startswith("file://"):
+        return uri
+    path = urlparse(uri).path
+    return unquote(path)
+
+def encode_file_uri(path: str) -> str:
+    """Convert filesystem path to file:// URI, with proper percent encoding."""
+    return "file://" + quote(path)
+
+# ---- Places implementations
+
+class PlacesBase:
+    def __init__(self, name:str):
+        self.name = name
+    def __str__(self):
+        return self.name
+    def load(self):        
+        pass # To implement in subclass
+    def save(self):
+        pass # To implement in subclass
+    def find(self, title: str) -> bool:
+        pass # To implement in subclass
+    def add(self, title: str, path: str):
+        pass # To implement in subclass
+    def remove(self, title: str):
+        pass # To implement in subclass
+    def list(self):
+        pass # To implement in subclass
+
+class KDEPlaces(PlacesBase):
+    """ KDE Places implementation.
+
+    KDE stores its file manager bookmarks in an XML file:
+      ~/.local/share/user-places.xbel
+
+    Each <bookmark> element has the form:
+      <bookmark href="file://PATH" title="TITLE"/>
+    """
+
+    def __init__(self):
+        super().__init__("KDE user places")
+        self.xbelPath = os.path.expanduser("~/.local/share/user-places.xbel")
+
+    def load(self):
+        if not os.path.exists(self.xbelPath):
+            raise NotSupportedException()
+        parser = etree.XMLParser(remove_blank_text=False)
+        self.tree = etree.parse(self.xbelPath, parser)
+
+    def save(self):
+        self.tree.write(self.xbelPath, pretty_print=True, xml_declaration=True, encoding="utf-8")
+
+    def find(self, title: str) -> bool:
+        root = self.tree.getroot()
+        for bm in root.findall(".//bookmark"):
+            href = bm.get("href", "")
+            if href.startswith("file:") and bm.findtext("title") == title:
+                return True
+        return False
+
+    def add(self, title: str, path: str):
+        root = self.tree.getroot()
+        href = encode_file_uri(path)
+        bm = etree.Element("bookmark", href=href)
+        title_el = etree.SubElement(bm, "title")
+        title_el.text = title
+        root.append(bm)
+
+    def remove(self, title: str) -> bool:
+        root = self.tree.getroot()
+        removed = False
+        for bm in root.findall(".//bookmark"):
+            href = bm.get("href", "")
+            if href.startswith("file:") and bm.findtext("title") == title:
+                root.remove(bm)
+                removed = True
+                break
+        return removed
+
+    def list(self):
+        root = self.tree.getroot()
+        bookmarks = root.findall(".//bookmark")
+        for bm in bookmarks:
+            href = bm.get("href", "")
+            if href.startswith("file:"):
+                path = decode_file_uri(href)
+                title_el = bm.find("title")
+                title = title_el.text if title_el is not None else "(no title)"
+                print(f"  %-20s %s" % (title, path))
+
+
+class GtkPlaces(PlacesBase):
+    """
+    GTK places implementation (Gnome, Xfce, etc.)
+
+    GTK stores its file manager bookmarks in a plain text file:
+      ~/.config/gtk-<version>/bookmarks
+
+    Each non-empty line has the form:
+      URI[ SPACE LABEL]
+    """
+
+    def __init__(self, gtk_version: str):
+        super().__init__(f"GTK-{gtk_version} bookmarks")
+        self.bookmarksFolder = os.path.expanduser(f"~/.config/gtk-{gtk_version}")
+        self.bookmarksFile = os.path.join(self.bookmarksFolder, "bookmarks")
+        self.entries: list[tuple[str, str]] = []
+
+    def load(self):
+        # If the folder doesn't exist, gtk-<version> is not supported
+        if not os.path.exists(self.bookmarksFolder):
+            raise NotSupportedException()
+
+        # If the file doesn't exist, create it
+        if not os.path.exists(self.bookmarksFile):
+            # Do equivalent of touch
+            open(self.bookmarksFile, "w").close()
+
+        self.entries = []
+        with open(self.bookmarksFile, "r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                # Format: URI[ SPACE LABEL]
+                if " " in line:
+                    uri, label = line.split(" ", 1)
+                else:
+                    uri, label = line, ""
+                self.entries.append((uri, label))
+
+    def save(self):
+        with open(self.bookmarksFile, "w", encoding="utf-8") as f:
+            for uri, label in self.entries:
+                if label:
+                    f.write(f"{uri} {label}\n")
+                else:
+                    f.write(f"{uri}\n")
+
+    def find(self, title: str) -> bool:
+        for _uri, label in self.entries:
+            if label == title:
+                return True
+        return False
+
+    def add(self, title: str, path: str):
+        # Store as file:// URI for local paths, matching GNOME's expectations.
+        uri = encode_file_uri(path)
+        self.entries.append((uri, title))
+
+    def remove(self, title: str) -> bool:
+        removed = False
+        new_entries: list[tuple[str, str]] = []
+        for uri, label in self.entries:
+            if not removed and label == title:
+                removed = True
+                continue
+            new_entries.append((uri, label))
+        self.entries = new_entries
+        return removed
+
+    def list(self):
+        if not self.entries:
+            print("  (empty)")
+        else:
+            for uri, label in self.entries:
+                path = decode_file_uri(uri)
+                title = label if label else "(no title)"
+                print(f"  %-20s %s" % (title, path))
+
+# ----
+
+def process(places: PlacesBase, args: list[str]):
+    cmd = args[0]
+    if cmd == "list":
+        places.load()
+        print(f"{str(places)}:")
+        places.list()
+        print()
+    elif cmd == "add" and len(args) == 3:
+        path = os.path.abspath(os.path.expanduser(args[2]))
+        places.load()
+        if places.find(args[1]):
+            print(f"'{args[1]}' already exists in {str(places)}")
+            return
+        places.add(args[1], path)
+        places.save()
+        print(f"Added: '{args[1]}' at: '{path}' to {str(places)}")
+    elif cmd == "remove" and len(args) == 2:
+        places.load()
+        if not places.find(args[1]):
+            print(f"'{args[1]}' not found in {str(places)}")
+            return
+        places.remove(args[1])
+        places.save()
+        print(f"Removed: '{args[1]}' from {str(places)}")
+    else:
+        raise UsageException()
+
+if __name__ == "__main__":
+    if len(sys.argv) == 1:
+        print(__doc__)
+        print(Usage)
+        print("Enabled environments:")
+        for places in get_places():
+            print(f"  {str(places)}")
+        print()
+    else:
+        for places in get_places():
+            try:
+                process(places, sys.argv[1:])
+            except UsageException as e:
+                print("Syntax error\n")
+                print(Usage)
+                sys.exit(1)
+            except NotSupportedException as e:
+                print(f"{str(places)} is not supported")
+            except Exception as e:
+                print(f"Command failed for {str(places)}: {str(e)}")
+
