@@ -38,7 +38,7 @@ sudo apt install python3-lxml
 Install the script by copying to a folder in PATH and making it executable:
 
 ```bash
-git clone github.com/larspontoppidan/places-cli
+git clone https://github.com/larspontoppidan/places-cli.git
 cd places-cli
 sudo cp places /usr/bin/
 sudo chmod +x /usr/bin/places
