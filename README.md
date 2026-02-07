@@ -1,6 +1,6 @@
 # places-cli
 
-Places is a command-line tool for managing folder bookmarks and places in Linux desktop environments. These are different names for folder shortcuts shown in File Manager applications and in Save and Load dialogs.
+Places is a command-line tool for managing folder bookmarks and "places" in Linux desktop environments. These are different names for folder shortcuts shown in File Manager applications and in Save and Load dialogs.
 
 When adding or removing the bookmarks, it is done for KDE, GTK-2, and GTK-3 at the same time to affect all applications, regardless of the desktop environment they were built for.
 
@@ -9,9 +9,11 @@ By Lars Ole Pontoppidan, 2026
 ### Usage
 
 ```text
-places list
-places add "TITLE" "PATH"
-places remove "TITLE"
+  places list                    List all bookmarks
+  places add <TITLE> <PATH>      Add bookmark at PATH with the given TITLE
+  places add <PATH>              Add bookmark at PATH using the PATH folder name as title
+  places add <FILE>              Add bookmark at the folder of FILE using FILE name as title
+  places remove <TITLE>|<PATH>   Remove bookmark referring to TITLE or PATH
 ```
 
 ### Example

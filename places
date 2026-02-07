@@ -1,15 +1,17 @@
 #!/usr/bin/env python3
-"""Places v1.0 by Lars Ole Pontoppidan. 
+"""Places v1.1 by Lars Ole Pontoppidan. 
 
-A CLI tool for managing folder bookmarks and places in Linux desktop environments. 
+CLI tool for managing folder bookmarks and places in Linux desktop environments. 
 
 https://github.com/larspontoppidan/places-cli
 """
 
 Usage = """Usage:
-  places list
-  places add "TITLE" "PATH"
-  places remove "TITLE"
+  places list                    List all bookmarks
+  places add <TITLE> <PATH>      Add bookmark at PATH with the given TITLE
+  places add <PATH>              Add bookmark at PATH using the PATH folder name as title
+  places add <FILE>              Add bookmark at the folder of FILE using FILE name as title
+  places remove <TITLE>|<PATH>   Remove bookmark referring to TITLE or PATH
 """
 
 # ----
@@ -54,11 +56,15 @@ class PlacesBase:
         self.name = name
     def __str__(self):
         return self.name
+    def getFileName(self) -> str:
+        pass # To implement in subclass
     def load(self):        
         pass # To implement in subclass
     def save(self):
         pass # To implement in subclass
-    def find(self, title: str) -> bool:
+    def findTitle(self, title: str) -> str | None:
+        pass # To implement in subclass
+    def findPath(self, path: str) -> str | None:
         pass # To implement in subclass
     def add(self, title: str, path: str):
         pass # To implement in subclass
@@ -81,45 +87,52 @@ class KDEPlaces(PlacesBase):
         super().__init__("KDE user places")
         self.xbelPath = os.path.expanduser("~/.local/share/user-places.xbel")
 
+    def getFileName(self) -> str:
+        return self.xbelPath
+
     def load(self):
         if not os.path.exists(self.xbelPath):
             raise NotSupportedException()
         parser = etree.XMLParser(remove_blank_text=False)
         self.tree = etree.parse(self.xbelPath, parser)
+        self.root = self.tree.getroot()
 
     def save(self):
         self.tree.write(self.xbelPath, pretty_print=True, xml_declaration=True, encoding="utf-8")
 
-    def find(self, title: str) -> bool:
-        root = self.tree.getroot()
-        for bm in root.findall(".//bookmark"):
+    def findTitle(self, title: str) -> str | None:
+        for bm in self.root.findall(".//bookmark"):
             href = bm.get("href", "")
             if href.startswith("file:") and bm.findtext("title") == title:
-                return True
-        return False
+                return decode_file_uri(href)
+        return None
 
+    def findPath(self, path: str) -> str | None:
+        for bm in self.root.findall(".//bookmark"):
+            href = bm.get("href", "")
+            if href.startswith("file:") and decode_file_uri(href) == path:
+                return bm.findtext("title")
+        return None
+    
     def add(self, title: str, path: str):
-        root = self.tree.getroot()
         href = encode_file_uri(path)
         bm = etree.Element("bookmark", href=href)
         title_el = etree.SubElement(bm, "title")
         title_el.text = title
-        root.append(bm)
+        self.root.append(bm)
 
     def remove(self, title: str) -> bool:
-        root = self.tree.getroot()
         removed = False
-        for bm in root.findall(".//bookmark"):
+        for bm in self.root.findall(".//bookmark"):
             href = bm.get("href", "")
             if href.startswith("file:") and bm.findtext("title") == title:
-                root.remove(bm)
+                self.root.remove(bm)
                 removed = True
                 break
         return removed
 
     def list(self):
-        root = self.tree.getroot()
-        bookmarks = root.findall(".//bookmark")
+        bookmarks = self.root.findall(".//bookmark")
         for bm in bookmarks:
             href = bm.get("href", "")
             if href.startswith("file:"):
@@ -145,6 +158,9 @@ class GtkPlaces(PlacesBase):
         self.bookmarksFolder = os.path.expanduser(f"~/.config/gtk-{gtk_version}")
         self.bookmarksFile = os.path.join(self.bookmarksFolder, "bookmarks")
         self.entries: list[tuple[str, str]] = []
+
+    def getFileName(self) -> str:
+        return self.bookmarksFile
 
     def load(self):
         # If the folder doesn't exist, gtk-<version> is not supported
@@ -177,11 +193,17 @@ class GtkPlaces(PlacesBase):
                 else:
                     f.write(f"{uri}\n")
 
-    def find(self, title: str) -> bool:
-        for _uri, label in self.entries:
+    def findTitle(self, title: str) -> str | None:
+        for uri, label in self.entries:
             if label == title:
-                return True
-        return False
+                return decode_file_uri(uri)
+        return None
+
+    def findPath(self, path: str) -> str | None:
+        for uri, label in self.entries:
+            if decode_file_uri(uri) == path:
+                return label
+        return None
 
     def add(self, title: str, path: str):
         # Store as file:// URI for local paths, matching GNOME's expectations.
@@ -210,32 +232,72 @@ class GtkPlaces(PlacesBase):
 
 # ----
 
-def process(places: PlacesBase, args: list[str]):
-    cmd = args[0]
+def process(places: PlacesBase, cmd: str, arg1: str, arg2: str):
     if cmd == "list":
         places.load()
-        print(f"{str(places)}:")
+        print(f"{str(places)}: ({places.getFileName()})")
         places.list()
         print()
-    elif cmd == "add" and len(args) == 3:
-        path = os.path.abspath(os.path.expanduser(args[2]))
+    elif cmd == "add":
         places.load()
-        if places.find(args[1]):
-            print(f"'{args[1]}' already exists in {str(places)}")
+        if places.findTitle(arg1):
+            print(f"'{arg1}' already exists in {str(places)}")
             return
-        places.add(args[1], path)
+        places.add(arg1, arg2)
         places.save()
-        print(f"Added: '{args[1]}' at: '{path}' to {str(places)}")
-    elif cmd == "remove" and len(args) == 2:
+        print(f"Added: '{arg1}' at: '{arg2}' to {str(places)}")
+    elif cmd == "remove":
         places.load()
-        if not places.find(args[1]):
-            print(f"'{args[1]}' not found in {str(places)}")
-            return
-        places.remove(args[1])
-        places.save()
-        print(f"Removed: '{args[1]}' from {str(places)}")
+        path = places.findTitle(arg1)
+        if path:
+            # User specified a title
+            places.remove(arg1)
+            places.save()
+            print(f"Removed: '{arg1}' at: '{path}' from {str(places)}")
+        else:
+            # Try to search for a path
+            path = os.path.abspath(os.path.expanduser(arg1))
+            title = places.findPath(path)
+            if title:
+                places.remove(title)
+                places.save()
+                print(f"Removed: '{title}' at: '{path}' from {str(places)}")
+            else:
+                print(f"Couldn't find title '{arg1}' or path '{path}' to remove in {str(places)}")
     else:
         raise UsageException()
+
+def processArgs(args: list[str]) -> tuple:
+    # Returns cmd, title, path
+    cmd = args[0]
+    if cmd == "list" and len(args) == 1:
+        return cmd, None, None
+    elif cmd == "add":
+        if len(args) == 3:
+            # User specified both title and path
+            path = os.path.abspath(os.path.expanduser(args[2]))
+            title = args[1]
+            if not os.path.isdir(path):
+                raise ValueError("Path does not exist: " + path)
+        elif len(args) == 2:
+            if os.path.isdir(args[1]):
+                # User specified a path, use the folder name as title
+                path = os.path.abspath(os.path.expanduser(args[1]))
+                title = os.path.basename(path)
+            elif os.path.isfile(args[1]):
+                # User specified a file, use the file name as title and the parent folder as path
+                path = os.path.abspath(os.path.expanduser(os.path.dirname(args[1])))
+                title = os.path.basename(args[1])
+            else:
+                raise ValueError("Path or file does not exist: " + args[1])
+        else:
+            raise UsageException("Invalid number of arguments")
+        return cmd, title, path
+    elif cmd == "remove" and len(args) == 2:
+        return cmd, args[1], None
+    else:
+        raise UsageException("Invalid command or arguments")
+
 
 if __name__ == "__main__":
     if len(sys.argv) == 1:
@@ -246,15 +308,18 @@ if __name__ == "__main__":
             print(f"  {str(places)}")
         print()
     else:
-        for places in get_places():
-            try:
-                process(places, sys.argv[1:])
-            except UsageException as e:
-                print("Syntax error\n")
-                print(Usage)
-                sys.exit(1)
-            except NotSupportedException as e:
-                print(f"{str(places)} is not supported")
-            except Exception as e:
-                print(f"Command failed for {str(places)}: {str(e)}")
+        try:
+            cmd, arg1, arg2 = processArgs(sys.argv[1:])
+            for places in get_places():
+                try:
+                    process(places, cmd, arg1, arg2)
+                except NotSupportedException as e:
+                    print(f"{str(places)} is not supported")
+                except Exception as e:
+                    print(f"Command failed for {str(places)}: {str(e)}")
+        except ValueError as e:
+            print(str(e)+"\n")
+        except UsageException as e:
+            print(str(e)+"\n")
+            print(Usage)
 
